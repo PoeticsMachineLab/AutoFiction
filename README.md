@@ -31,7 +31,7 @@ ai_playground/
     ├── state.py      # NarrativeState TypedDict
     ├── nodes.py      # 6개 노드 함수
     ├── graph.py      # StateGraph 조립 & 엣지 정의
-    ├── utils.py      # YAML read/write, XML 파서
+    ├── utils.py      # YAML read/write, XML 파서, NetworkX 그래프 헬퍼
     ├── prompts.py    # 시스템/유저 프롬프트 템플릿
     └── main.py       # CLI 진입점
 ```
@@ -64,13 +64,14 @@ ai_playground/
 | `output_parser` | LLM 출력의 `<narrative>` / `<updates>` XML 블록 파싱 |
 | `state_updater` | Settings YAML 파일 업데이트 (events_log, payoff_queue, main_logline 등) |
 | `novel_writer` | Claude Opus로 플롯 개요를 완성도 높은 소설 산문으로 재작성 |
-| `sequence_creator` | Sequence N+1/ 폴더 및 파일 생성, novel_writer 출력을 narrative.md로 저장 |
+| `sequence_creator` | Sequence N+1/ 폴더 및 파일 생성, novel_writer 출력을 narrative.md로 저장. NetworkX MultiDiGraph로 캐릭터 관계 업데이트 후 YAML 직렬화 |
 
 ### 컨텍스트 압축 전략
 
 - **직전 시퀀스**: `narrative.md` 전문 포함 (최신 맥락)
 - **N-2 이전**: `events_log.yaml`의 `summary` 필드만 참조 (압축 기억)
 - **Settings 전체**: `world_rules` + `narrative_rules` + `payoff_queue` 항상 포함
+- **캐릭터 그래프**: CHAR_01(주인공) 기준 radius=2 서브그래프만 LLM에 전달 (전체 덤프 대신)
 
 ---
 
@@ -177,7 +178,7 @@ LLM은 두 XML 블록만 출력합니다:
 
 | 파일 | 수정 주체 | 역할 |
 |------|----------|------|
-| `characters_and_factions.yaml` | agent | 현재 등장인물 상태 및 진영 (매 시퀀스 갱신) |
+| `characters_and_factions.yaml` | agent | 현재 등장인물 상태 및 진영 (매 시퀀스 갱신). `nodes` + `edges` 최상위 키 구조 — NetworkX MultiDiGraph로 in-memory 처리 후 YAML 저장 |
 | `sequence_trigger.yaml` | 사람 / agent | `current_drive` + `ingredients_to_use`만 포함 (가변 정보) |
 | `narrative.md` | agent | `novel_writer`가 생성한 완성 소설 산문 |
 
@@ -216,6 +217,40 @@ python -m agent.main --max-sequences 3
 
 ---
 
+## NetworkX 그래프 레이어
+
+`characters_and_factions.yaml`은 `nodes + edges` 구조로 저장됩니다. YAML은 영속 저장소(source of truth)이고, NetworkX는 로딩~저장 사이의 in-memory 처리 레이어입니다.
+
+```yaml
+# characters_and_factions.yaml 구조
+nodes:
+  characters:
+    - id: CHAR_01
+      name: "..."
+      current_status: "..."
+  factions:
+    - id: FAC_01
+      ...
+edges:
+  - from: CHAR_01
+    to: CHAR_02
+    relation: trust
+    strength: 0.8
+    since_sequence: 1
+```
+
+`utils.py` 헬퍼:
+
+| 함수 | 역할 |
+|------|------|
+| `load_graph(characters)` | YAML dict → `nx.MultiDiGraph` |
+| `dump_graph(G)` | `nx.MultiDiGraph` → YAML dict |
+| `extract_relevant_subgraph(G, radius=2)` | CHAR_01 기준 ego 서브그래프 추출 (프롬프트 토큰 절감) |
+
+`MultiDiGraph`를 사용하는 이유: 같은 두 노드 사이에 `trust`, `past_connection` 등 여러 관계 타입이 동시에 존재할 수 있기 때문입니다.
+
+---
+
 ## 의존성
 
 | 패키지 | 용도 |
@@ -223,3 +258,4 @@ python -m agent.main --max-sequences 3
 | `langgraph` | StateGraph 기반 에이전트 오케스트레이션 |
 | `anthropic` | Claude API 클라이언트 |
 | `pyyaml` | YAML 파일 read/write |
+| `networkx` | 캐릭터 관계 그래프 in-memory 처리 |
